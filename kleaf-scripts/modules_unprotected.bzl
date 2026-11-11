@@ -25,7 +25,7 @@ _unprotected_modules_map = {
         "drivers/block/zram/zram.ko",
         "mm/zsmalloc.ko",
     ],
-    "pudding_consolidate": [
+    "pudding_perf": [
         # keep sorted
         "drivers/block/zram/zram.ko",
         "mm/zsmalloc.ko",

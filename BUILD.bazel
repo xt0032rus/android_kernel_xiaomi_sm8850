@@ -21,7 +21,7 @@ load(
     "define_canoe_tuivm",
 )
 load(":kleaf-scripts/targets/canoe_vms.bzl", "define_canoe_vms")
-load(":kleaf-scripts/targets/pudding.bzl", "define_pudding")
+# load(":kleaf-scripts/targets/pudding.bzl", "define_pudding")
 load(":kleaf-scripts/targets/myron.bzl", "define_myron")
 load(":kleaf-scripts/targets/glymur.bzl", "define_glymur")
 load(":kleaf-scripts/targets/hamoa.bzl", "define_hamoa")
@@ -368,7 +368,7 @@ label_flag(
 
 define_canoe()
 
-define_pudding()
+# define_pudding()
 
 define_myron()
 

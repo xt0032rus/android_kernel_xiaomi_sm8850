@@ -1,4 +1,4 @@
-pudding_consolidate_config = {
+pudding_perf_config = {
     # keep sorted
     "CONFIG_DEVICE_MODULES_DIO_DMABUF_MAPPER": "m",
     "CONFIG_IR_SPI": "m",
