@@ -175,18 +175,8 @@ static int is_buf_empty(struct mitee_memlog_state *s)
 	struct log_rb *log = s->log;
 	uint32_t get, put;
 
-	get = s->get;
-	put = log->put;
-	return (get == put);
-}
-
-static int is_b_buf_empty(struct mitee_memlog_state *s)
-{
-	struct log_rb *log = s->log;
-	uint32_t get, put;
-
-	get = s->b_get;
-	put = log->b_put;
+	get = READ_ONCE(s->get);
+	put = READ_ONCE(log->put);
 	return (get == put);
 }
 
@@ -198,7 +188,10 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 	int read_chars = 0, copy_chars = 0, tbuf_size, outbuf_size;
 	char *psrc = NULL;
 
-	if (!g_read_b_buf) {
+	if (!size)
+		return 0;
+
+	if (!READ_ONCE(g_read_b_buf)) {
 		/*
 		 * For this ring buffer, at any given point, alloc >= put >= get.
 		 * The producer side of the buffer is not locked, so the put and alloc
@@ -206,11 +199,11 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 		 * that the above condition is maintained. A read barrier is needed
 		 * to make sure the hardware and compiler keep the reads ordered.
 		 */
-		get = s->b_get;
-		put = log->b_put;
+		get = READ_ONCE(s->b_get);
+		put = READ_ONCE(log->b_put);
 		/* make sure the hardware and compiler reads the correct put & alloc*/
 		rmb();
-		alloc = log->b_alloc;
+		alloc = READ_ONCE(log->b_alloc);
 
 		/* the counters wrap, compare distances rather than positions */
 		if (alloc - get > log->b_sz) {
@@ -219,14 +212,15 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 		}
 
 		if (put - get > log->b_sz)
-			return -EFAULT;
+			get = put;
 
-		if (is_b_buf_empty(s)) {
-			g_read_b_buf = true;
+		if (get == put) {
+			WRITE_ONCE(s->b_get, get);
+			WRITE_ONCE(g_read_b_buf, true);
 			return 0;
 		}
 
-		outbuf_size = min((int)(put - get), (int)size);
+		outbuf_size = min_t(size_t, put - get, size);
 
 		tbuf_size = (outbuf_size / MITEE_LINE_BUFFER_SIZE + 1) *
 			    MITEE_LINE_BUFFER_SIZE;
@@ -241,11 +235,12 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 			read_chars = log_read_b_line(s, put, get);
 			/* Force the loads from log_read_line to complete. */
 			rmb();
-			if (copy_chars + read_chars > outbuf_size)
-				break;
+			read_chars = min(read_chars, outbuf_size - copy_chars);
 			memcpy(psrc + copy_chars, s->line_buffer, read_chars);
 			get += read_chars;
 			copy_chars += read_chars;
+			if (copy_chars == outbuf_size)
+				break;
 		}
 
 		if (copy_to_user(buf, psrc, copy_chars)) {
@@ -254,7 +249,7 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 		}
 		kfree(psrc);
 
-		s->b_get = get;
+		WRITE_ONCE(s->b_get, get);
 
 		return copy_chars;
 	} else {
@@ -265,11 +260,11 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 		 * that the above condition is maintained. A read barrier is needed
 		 * to make sure the hardware and compiler keep the reads ordered.
 		 */
-		get = s->get;
-		put = log->put;
+		get = READ_ONCE(s->get);
+		put = READ_ONCE(log->put);
 		/* make sure the hardware and compiler reads the correct put & alloc*/
 		rmb();
-		alloc = log->alloc;
+		alloc = READ_ONCE(log->alloc);
 
 		/* the counters wrap, compare distances rather than positions */
 		if (alloc - get > log->sz) {
@@ -277,13 +272,19 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 			get = alloc - log->sz;
 		}
 
+		/*
+		 * No committed bytes survived the overwrite. Catch up to put so
+		 * poll does not keep returning the same unreadable data.
+		 */
 		if (put - get > log->sz)
-			return -EFAULT;
+			get = put;
 
-		if (is_buf_empty(s))
+		if (get == put) {
+			WRITE_ONCE(s->get, get);
 			return 0;
+		}
 
-		outbuf_size = min((int)(put - get), (int)size);
+		outbuf_size = min_t(size_t, put - get, size);
 
 		tbuf_size = (outbuf_size / MITEE_LINE_BUFFER_SIZE + 1) *
 			    MITEE_LINE_BUFFER_SIZE;
@@ -298,11 +299,12 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 			read_chars = log_read_line(s, put, get);
 			/* Force the loads from log_read_line to complete. */
 			rmb();
-			if (copy_chars + read_chars > outbuf_size)
-				break;
+			read_chars = min(read_chars, outbuf_size - copy_chars);
 			memcpy(psrc + copy_chars, s->line_buffer, read_chars);
 			get += read_chars;
 			copy_chars += read_chars;
+			if (copy_chars == outbuf_size)
+				break;
 		}
 
 		if (copy_to_user(buf, psrc, copy_chars)) {
@@ -311,7 +313,7 @@ static int do_mitee_memlog_read(struct mitee_memlog_state *s, char __user *buf,
 		}
 		kfree(psrc);
 
-		s->get = get;
+		WRITE_ONCE(s->get, get);
 
 		return copy_chars;
 	}
@@ -324,8 +326,8 @@ static ssize_t mitee_memlog_read(struct file *file, char __user *buf,
 	int ret = 0;
 
 	if (atomic_xchg(&s->readable, 0)) {
+		WRITE_ONCE(s->poll_event, atomic_read(&s->mitee_log_event_count));
 		ret = do_mitee_memlog_read(s, buf, size);
-		s->poll_event = atomic_read(&s->mitee_log_event_count);
 		atomic_set(&s->readable, 1);
 	}
 	return ret;
@@ -339,7 +341,7 @@ static int mitee_memlog_open(struct inode *inode, struct file *file)
 	ret = nonseekable_open(inode, file);
 	if (unlikely(ret))
 		return ret;
-	s->poll_event = atomic_read(&s->mitee_log_event_count);
+	WRITE_ONCE(s->poll_event, atomic_read(&s->mitee_log_event_count));
 	return 0;
 }
 
@@ -354,12 +356,12 @@ static unsigned int mitee_memlog_poll(struct file *file,
 	struct mitee_memlog_state *s = pde_data(file_inode(file));
 	int mask = 0;
 
-	if (!is_buf_empty(s))
-		return POLLIN | POLLRDNORM;
-
 	poll_wait(file, &s->mitee_log_wq, wait);
 
-	if (s->poll_event != atomic_read(&s->mitee_log_event_count))
+	if ((!READ_ONCE(g_read_b_buf) &&
+	     READ_ONCE(s->b_get) != READ_ONCE(s->log->b_put)) ||
+	    !is_buf_empty(s) ||
+	    READ_ONCE(s->poll_event) != atomic_read(&s->mitee_log_event_count))
 		mask |= POLLIN | POLLRDNORM;
 	return mask;
 }
